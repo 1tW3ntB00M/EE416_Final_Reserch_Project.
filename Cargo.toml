@@ -1,0 +1,23 @@
+[package]
+name = "odin-gsp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+odin_actor     = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_build     = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_action    = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_common    = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_server    = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_cesium    = { git = "https://github.com/ODIN-fire/odin-rs" }
+odin_openmeteo = { git = "https://github.com/ODIN-fire/odin-rs" }
+aws-smithy-types = "=1.6.2"
+
+[patch."https://github.com/ODIN-fire/odin-rs"]
+odin_actor = { path = "../odin-rs/odin_actor" }
+odin_build = { path = "../odin-rs/odin_build" }
+odin_action = { path = "../odin-rs/odin_action" }
+odin_common = { path = "../odin-rs/odin_common" }
+odin_server = { path = "../odin-rs/odin_server" }
+odin_cesium = { path = "../odin-rs/odin_cesium" }
+odin_openmeteo = { path = "../odin-rs/odin_openmeteo" }
