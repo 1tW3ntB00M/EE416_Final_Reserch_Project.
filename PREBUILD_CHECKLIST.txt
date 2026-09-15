@@ -1,0 +1,74 @@
+ODIN-GSP WINDOWS PRE-BUILD CHECKLIST
+====================================
+Do all of this BEFORE running cargo build.
+Replace <ODIN> with your checkout folder, e.g. C:\Users\you\Desktop\ODIN.
+
+1. FOLDER LAYOUT
+----------------
+<ODIN>/
+  odin-gsp/   (this repo / branch)
+  odin-rs/    (sibling clone, see step 2)
+  vcpkg/      (see step 3)
+
+2. CLONE odin-rs AS A SIBLING
+------------------------------
+  cd <ODIN>
+  git clone https://github.com/ODIN-fire/odin-rs
+
+3. REMOVE bindgen FROM odin-rs
+------------------------------
+Edit <ODIN>\odin-rs\Cargo.toml (workspace dependencies, ~line 117-118).
+Change this:
+  gdal = { version = "0.19", features = ["array", "bindgen"] }
+  gdal-sys = { version = "0.12", features = ["bindgen"] }
+To this:
+  gdal = { version = "0.19", features = ["array"] }
+  gdal-sys = { version = "0.12" }
+
+Why: fresh MSVC bindgen emits c_int enums where gdal 0.19 expects
+c_uint (58 type errors). Without bindgen, gdal-sys uses its prebuilt
+3_12 bindings, which match.
+
+4. INSTALL GDAL WITH VCPKG
+--------------------------
+  cd <ODIN>\vcpkg
+  vcpkg install gdal:x64-windows
+
+5. SET ENVIRONMENT VARIABLES (PERSISTENT)
+-----------------------------------------
+Run in PowerShell (adjust <ODIN>), then RESTART the terminal
+($env: edits alone are session-only and will be lost):
+
+  setx GDAL_VERSION "3.12.4"
+  setx GDAL_INCLUDE_DIR "<ODIN>\vcpkg\installed\x64-windows\include"
+  setx GDAL_LIB_DIR "<ODIN>\vcpkg\installed\x64-windows\lib"
+
+Delete GDAL_HOME if present (a GISInternals install hijacks linking):
+
+  Remove-ItemProperty -Path HKCU:\Environment -Name GDAL_HOME -ErrorAction SilentlyContinue
+
+Do NOT set GDAL_VERSION to 0.12.0. That is the Rust crate version,
+not the GDAL library version. Use the real library version (3.12.4).
+
+6. EVERY NEW TERMINAL, BEFORE BUILDING
+--------------------------------------
+Put the GDAL DLL on PATH:
+
+  $env:PATH="<ODIN>\vcpkg\installed\x64-windows\bin;$env:PATH"
+
+7. BUILD
+--------
+  cd <ODIN>\odin-gsp
+  cargo clean -p gdal-sys -p gdal
+  cargo build
+
+8. NOTES
+--------
+- Build odin-gsp, NOT the whole odin-rs workspace. The gpshub binary
+  in odin-rs calls socket2 set_reuse_port (Unix-only) and fails with
+  E0599 on Windows. That error is unrelated to GDAL.
+- If gdal-sys fails with "must emit the version of libgdal via
+  cargo:version_number: NotPresent", your GDAL_VERSION / pkg-config
+  setup is wrong; redo step 5 and restart the terminal.
+- If gdal fails with "No pre-built bindings for GDAL version 0.12",
+  GDAL_VERSION reverted to the old 0.12.0 value; redo step 5.
