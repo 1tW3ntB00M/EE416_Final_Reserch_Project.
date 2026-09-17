@@ -4757,6 +4757,7 @@ dependencies = [
 name = "odin-gsp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "aws-smithy-types",
  "odin_action",
  "odin_actor",
@@ -4765,6 +4766,7 @@ dependencies = [
  "odin_common",
  "odin_openmeteo",
  "odin_server",
+ "tokio",
 ]
 
 [[package]]

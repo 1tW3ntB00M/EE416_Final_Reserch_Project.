@@ -12,6 +12,8 @@ odin_server    = { git = "https://github.com/ODIN-fire/odin-rs" }
 odin_cesium    = { git = "https://github.com/ODIN-fire/odin-rs" }
 odin_openmeteo = { git = "https://github.com/ODIN-fire/odin-rs" }
 aws-smithy-types = "=1.6.2"
+tokio = { version = "1.49", features = ["full", "tracing"] }
+anyhow = { version = "1.0.100" }
 
 [patch."https://github.com/ODIN-fire/odin-rs"]
 odin_actor = { path = "../odin-rs/odin_actor" }
