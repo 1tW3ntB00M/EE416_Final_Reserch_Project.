@@ -1,7 +1,9 @@
 ODIN-GSP WINDOWS PRE-BUILD CHECKLIST
 ====================================
-Do all of this BEFORE running cargo build.
-Replace <ODIN> with your checkout folder, e.g. C:\Users\you\Desktop\ODIN.
+PREFERRED: just run  .\setup-windows.ps1  from this folder.
+It does steps 1-7 automatically (idempotent). Below is the MANUAL
+fallback if the script is blocked. Replace <ODIN> with your checkout
+folder, e.g. C:\Users\you\Desktop\ODIN.
 
 1. FOLDER LAYOUT
 ----------------

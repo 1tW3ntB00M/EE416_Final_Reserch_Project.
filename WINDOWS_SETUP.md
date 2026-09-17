@@ -1,6 +1,28 @@
-# Windows build setup (GDAL / odin-rs patch)
+# Windows setup — 1 command (idiot-proof)
 
-This branch makes `odin-gsp` build on Windows with vcpkg GDAL 3.12.x.
+Prereqs (install once): Git, Rust via rustup (MSVC toolchain),
+VS Build Tools "Desktop development with C++", CMake.
+
+```powershell
+cd <ODIN>\odin-gsp
+.\setup-windows.ps1
+# or in VSCode: Ctrl+Shift+B -> "1 - Setup Windows (idiot-proof)"
+cargo run
+```
+
+That script (idempotent, safe to re-run) auto: clones sibling
+`../odin-rs`, strips `bindgen` from its gdal deps (prebuilt 3_12
+bindings), bootstraps `../vcpkg` + `gdal:x64-windows` if missing,
+sets session + persistent `GDAL_VERSION/_INCLUDE_DIR/_LIB_DIR`,
+removes hijacking `GDAL_HOME`, puts the GDAL DLL on PATH, syncs
+`.cargo/config.toml`, and runs `cargo check`.
+
+No terminal restart needed — the script sets the current session too.
+`.cargo/config.toml` uses portable relative paths (`../vcpkg/...`)
+and `.vscode/` auto-prepends the DLL dir + feeds rust-analyzer the
+same env, so fresh clones work in VSCode immediately after the script.
+
+## Manual fallback (if the script is blocked)
 
 ## 1. Layout
 

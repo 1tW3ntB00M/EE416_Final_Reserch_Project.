@@ -1,0 +1,15 @@
+{
+  // Auto-prepend vcpkg GDAL DLL dir for every new VSCode terminal (repo-relative, portable).
+  "terminal.integrated.env.windows": {
+    "PATH": "${workspaceFolder}/../vcpkg/installed/x64-windows/bin;${env:PATH}"
+  },
+  // rust-analyzer runs cargo check under the hood; give it the same env so
+  // squiggles work right after clone even before setx + terminal restart.
+  "rust-analyzer.cargo.extraEnv": {
+    "GDAL_VERSION": "3.12.4",
+    "GDAL_INCLUDE_DIR": "${workspaceFolder}/../vcpkg/installed/x64-windows/include",
+    "GDAL_LIB_DIR": "${workspaceFolder}/../vcpkg/installed/x64-windows/lib",
+    "PATH": "${workspaceFolder}/../vcpkg/installed/x64-windows/bin;${env:PATH}"
+  },
+  "rust-analyzer.check.command": "check"
+}

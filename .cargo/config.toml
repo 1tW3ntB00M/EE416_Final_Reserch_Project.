@@ -1,2 +1,10 @@
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
+
+# Portable Windows GDAL env: relative paths resolve to <ODIN>/vcpkg/...
+# (relative = true means relative to parent of .cargo/, i.e. odin-gsp/).
+# setup-windows.ps1 keeps GDAL_VERSION in sync with the installed vcpkg GDAL.
+[env]
+GDAL_VERSION = "3.12.4"
+GDAL_INCLUDE_DIR = { value = "../vcpkg/installed/x64-windows/include", relative = true }
+GDAL_LIB_DIR = { value = "../vcpkg/installed/x64-windows/lib", relative = true }

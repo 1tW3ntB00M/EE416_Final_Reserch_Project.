@@ -15,7 +15,7 @@ pub struct IngestActor {
     //everything the actor needs to remember between messages lives here (e.g. its state)
     //variables
     poll_secs: u64,
-    last_frame: Option<vec<u8>>,
+    last_frame: Option<Vec<u8>>,
 }
 //poll_secs goes inside new because it's configurable state, a parameter. 
 //last_frame does not because it will always start the same way 

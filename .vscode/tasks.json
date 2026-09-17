@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "1 - Setup Windows (idiot-proof)",
+      "type": "shell",
+      "command": "${workspaceFolder}/setup-windows.ps1",
+      "options": { "powershell": { "executionPolicy": "Bypass" } },
+      "presentation": { "reveal": "always", "panel": "new" },
+      "problemMatcher": []
+    },
+    {
+      "label": "2 - Build",
+      "type": "cargo",
+      "command": "check",
+      "options": { "env": { "PATH": "${workspaceFolder}/../vcpkg/installed/x64-windows/bin;${env:PATH}" } },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "3 - Run (with GDAL DLL on PATH)",
+      "type": "shell",
+      "command": "cargo run",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PATH": "${workspaceFolder}/../vcpkg/installed/x64-windows/bin;${env:PATH}" }
+      },
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "new" },
+      "problemMatcher": []
+    }
+  ]
+}
