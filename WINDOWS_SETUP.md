@@ -6,7 +6,7 @@ VS Build Tools "Desktop development with C++", CMake.
 ```powershell
 cd <ODIN>\odin-gsp
 .\setup-windows.ps1
-# or in VSCode: Ctrl+Shift+B -> "1 - Setup Windows (idiot-proof)"
+# or in VSCode: Ctrl+Shift+B -> "1 - Setup Windows"
 cargo run
 ```
 
