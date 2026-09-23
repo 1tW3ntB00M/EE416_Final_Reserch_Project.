@@ -4766,6 +4766,8 @@ dependencies = [
  "odin_common",
  "odin_openmeteo",
  "odin_server",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

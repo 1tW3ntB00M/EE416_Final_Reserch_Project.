@@ -1,3 +1,6 @@
+mod ingest;
+mod gsp;
+
 use odin_actor::prelude::*;
 use odin_server::prelude::*;
 
