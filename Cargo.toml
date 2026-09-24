@@ -11,9 +11,11 @@ odin_common    = { git = "https://github.com/ODIN-fire/odin-rs" }
 odin_server    = { git = "https://github.com/ODIN-fire/odin-rs" }
 odin_cesium    = { git = "https://github.com/ODIN-fire/odin-rs" }
 odin_openmeteo = { git = "https://github.com/ODIN-fire/odin-rs" }
+lorawan = { path = "../lora-rs/lorawan-encoding" }
 aws-smithy-types = "=1.6.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
+async-trait = "0.1"
 tokio = { version = "1.49", features = ["full", "tracing"] }
 anyhow = { version = "1.0.100" }
 
