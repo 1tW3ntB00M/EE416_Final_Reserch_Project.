@@ -23,6 +23,8 @@ pub struct LightningEvent {
     pub pixel_col: u16,   // strike column for azimuth (FUN-F5-002)
     pub confidence: u8,   // 0-100 edge confidence from sensor
     pub flags: u8,        // health / optical-only-test bit etc.
+    pub lat: Option<f64>,
+    pub lon: Option<f64>
 }
 
 #[derive(Debug)]
@@ -50,7 +52,7 @@ impl LightningEvent {
 // Assumed minimal layout (little-endian, 13 bytes):
 // [0..2] sensor_id u16 | [2..6] t_v u32 | [6..8] delta_ms u16 |
 // [8..10] pixel_col u16 | [10] confidence u8 | [11] flags u8 | [12] checksum (xor 0..12)
-pub fn decode_lora(bytes: &[u8]) -> anyhow::Result<LightningEvent> {
+pub fn decode_lora(bytes: &[u8], lat: Option<f64>, lon: Option<f64>) -> anyhow::Result<LightningEvent> {
     if bytes.len() < 13 {
         anyhow::bail!("LoRa packet too short: {} < 13 bytes", bytes.len());
     }
@@ -75,7 +77,53 @@ pub fn decode_lora(bytes: &[u8]) -> anyhow::Result<LightningEvent> {
         pixel_col,
         confidence,
         flags,
+        lat,
+        lon
     })
+}
+
+// Hardcoded test data for webpage display. t_a > t_v and dt <= 60s so
+// validate() passes; lat/lon are required by assets/gsp.js upsertEntity()
+// (events without lat/lon are hidden on the globe).
+pub fn test_events() -> Vec<LightningEvent> {
+    vec![
+        LightningEvent {
+            event_id: "test-001".to_string(),
+            sensor_id: 1,
+            t_v: 1759090000,
+            t_a: 1759090012,
+            delta_ms: 12000,
+            pixel_col: 320,
+            confidence: 85,
+            flags: 0,
+            lat: Some(37.7749),
+            lon: Some(-122.4194),
+        },
+        LightningEvent {
+            event_id: "test-002".to_string(),
+            sensor_id: 2,
+            t_v: 1759090060,
+            t_a: 1759090075,
+            delta_ms: 15000,
+            pixel_col: 410,
+            confidence: 42,
+            flags: 0,
+            lat: Some(37.3382),
+            lon: Some(-121.8863),
+        },
+        LightningEvent {
+            event_id: "test-003".to_string(),
+            sensor_id: 1,
+            t_v: 1759090120,
+            t_a: 1759090128,
+            delta_ms: 8000,
+            pixel_col: 288,
+            confidence: 95,
+            flags: 0,
+            lat: Some(38.5816),
+            lon: Some(-121.4944),
+        },
+    ]
 }
 
 // --- 3. state + constructor: everything the actor remembers between msgs ---
@@ -120,10 +168,17 @@ impl IngestActor {
 impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
     _Start_ => cont! {
         info!("IngestActor started");
+        // push hardcoded test data so the webpage has something to display
+        for evt in test_events() {
+            match evt.validate() {
+                Ok(()) => self.store(evt),
+                Err(e) => warn!("quarantine test event: {}", e),
+            }
+        }
     }
     LoraPacket => cont! {
         // decode bits -> validate -> store or quarantine
-        match decode_lora(&msg.0) {
+        match decode_lora(&msg.0, None, None) {
             Ok(evt) => match evt.validate() {
                 Ok(()) => self.store(evt),
                 Err(e) => self.quarantine(&e.to_string(), &msg.0),

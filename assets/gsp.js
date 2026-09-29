@@ -31,14 +31,14 @@ console.log("gsp initialized");
 
 function createIcon() {
     return ui.Icon(
-        "./asset/odin_gsp/lightning-icon.svg",
+        "./asset/odin-gsp/lightning-icon.svg",
         (e) => ui.toggleWindow(e, "gsp"),
         "GSP lightning strikes",
     );
 }
 
 function createWindow() {
-    return ui.Window("Lightning GSP", "gsp", "./asset/odin_gsp/lightning-icon.svg")(
+    return ui.Window("Lightning GSP", "gsp", "./asset/odin-gsp/lightning-icon.svg")(
         ui.LayerPanel("gsp", toggleShowGsp),
         ui.Panel("events", true)(
             ui.RowContainer()(
