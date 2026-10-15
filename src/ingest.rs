@@ -2,12 +2,44 @@ use odin_actor::prelude::*;
 use odin_server::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::gsp_service::GspService;
+use std::sync::{Arc, Mutex};
 
 // --- 1. messages this actor can receive: one struct per mailbox "slot" ---
 // Raw bytes as they arrive from the LoRa gateway (transport TBD - for now
 // another task just does h_ingest.send_msg(LoraPacket(bytes)).await).
 #[derive(Debug)]
-pub struct LoraPacket(pub Vec<u8>);
+pub struct LoraPacket{
+    pub bytes: Vec<u8>,     // the 5/9 gsp-lora/v1 packet
+    pub dev_eui: String,    // e.g. "70B3D57ED0000001"
+    pub t_rx: i64           // gateway receive time, unix secs
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum BridgeConfig {
+    Mqtt { broker: String, uplink_topic: String, downlink_topic: String },
+    Serial { port: String, baud: u32 },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SensorConfig {
+    pub dev_eui: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub alt: f64,
+    pub bearing_deg: f32,
+    pub fov_h_deg: f32,
+    pub fov_v_deg: f32,
+    pub nominal_range_m: u32,
+    pub armed: bool,
+    pub sensitivity: u8,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoraConfig {
+    pub version: String,
+    pub bridge: BridgeConfig,
+    pub sensors: std::collections::HashMap<String, SensorConfig>, // key = sensor_id as string
+}
 
 
 // Decoded + validated event, ready to log/store (and later forward to
@@ -23,8 +55,15 @@ pub struct LightningEvent {
     pub pixel_col: u16,   // strike column for azimuth (FUN-F5-002)
     pub confidence: u8,   // 0-100 edge confidence from sensor
     pub flags: u8,        // gsp-lora/v1 flags byte verbatim: bit0 Flash, bit1 Line, bit2 Thunder, bits3-7 reserved=0
+    pub state: GspState, // classified display state (set at decode time via classify)
     pub lat: Option<f64>,
-    pub lon: Option<f64>
+    pub lon: Option<f64>,
+    // sensor geometry from lora.ron (copied at decode time so the browser can
+    // draw the FoV cone without a second lookup)
+    pub bearing_deg: f32,
+    pub fov_h_deg: f32,
+    pub fov_v_deg: f32,
+    pub nominal_range_m: u32,
 }
 
 #[derive(Debug)]
@@ -48,6 +87,18 @@ pub struct SensorStatus {
 
 #[derive(Debug)]
 pub struct SensorStatusMsg(pub SensorStatus);
+
+impl LoraConfig {
+    pub fn by_deveui(&self, dev_eui: &str) -> Option<(u16, &SensorConfig)> {
+        self.sensors.iter().find_map(|(id_str, cfg)| {
+            if cfg.dev_eui.eq_ignore_ascii_case(dev_eui) {
+                id_str.parse::<u16>().ok().map(|id| (id, cfg))
+            } else {
+                None
+            }
+        })
+    }
+}
 
 impl SensorStatus {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -132,6 +183,9 @@ impl SendCommand {
 // (system msgs _Start_, _Terminate_, ... are added automatically)
 define_actor_msg_set! {pub IngestMsg = LoraPacket | SensorEvent | SensorStatusMsg | SendCommand}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GspState { Candidate, Probable, Confirmed }
+
 impl LightningEvent {
     // FUN-F4-004: schema / time-order validation. Invalid => quarantine, never panic.
     // gsp-lora/v1: Flash=0 (status) never validates as lightning; reserved bits must be 0;
@@ -158,14 +212,24 @@ impl LightningEvent {
             _ => anyhow::bail!("inconsistent thunder fields: t_a={:?} delta_ms={:?}", self.t_a, self.delta_ms),
         }
     }
+    pub fn classify(&self) -> GspState {
+        let line = self.flags & 0x02 != 0;
+        let thunder = (self.flags & 0x04 != 0) && self.delta_ms.is_some(); // 9B, time-gated
+        match (line, thunder) {
+            (true, true) => GspState::Confirmed, // edge + acoustic + time-gated
+            (false, false) => GspState::Candidate, // flash-only
+            _ => GspState::Probable, // partial
+        }
+    }
 }
 
-// gsp-lora/v1 wire format (little-endian). Identity + time are NOT on air:
-// sensor_id comes from the DevEUI registry map, t_v is gateway T_rx — both passed in.
+// gsp-lora/v1 wire format (little-endian). Identity, time, position and geometry
+// are NOT on air: sensor_id comes from the DevEUI registry map, t_v is gateway
+// T_rx, and everything else comes from cfg — all passed in by the caller.
 // 5-byte (no thunder): [0] flags | [1] confidence | [2..4] pixel_col u16 | [4] checksum (xor 0..4)
 // 9-byte (thunder):    [0..4] same as above + [4..8] delta_ms u32 | [8] checksum (xor 0..8)
 // flags: bit0 Flash (1=lightning, 0=status), bit1 Line, bit2 Thunder, bits3-7 reserved=0.
-pub fn decode_lora(bytes: &[u8], sensor_id: u16, t_v: i64, lat: Option<f64>, lon: Option<f64>) -> anyhow::Result<LightningEvent> {
+pub fn decode_lora(bytes: &[u8], sensor_id: u16, t_v: i64, cfg: &SensorConfig) -> anyhow::Result<LightningEvent> {
     if bytes.len() != 5 && bytes.len() != 9 {
         anyhow::bail!("LoRa packet must be 5 or 9 bytes, got {}", bytes.len());
     }
@@ -196,7 +260,7 @@ pub fn decode_lora(bytes: &[u8], sensor_id: u16, t_v: i64, lat: Option<f64>, lon
     } else {
         (None, None)
     };
-    Ok(LightningEvent {
+    let mut evt = LightningEvent {
         event_id: format!("{}-{}", sensor_id, t_v),
         sensor_id,
         t_v,
@@ -205,53 +269,16 @@ pub fn decode_lora(bytes: &[u8], sensor_id: u16, t_v: i64, lat: Option<f64>, lon
         pixel_col,
         confidence,
         flags,
-        lat,
-        lon
-    })
-}
-
-// Hardcoded test data for webpage display. t_a > t_v and dt <= 60s so
-// validate() passes; lat/lon are required by assets/gsp.js upsertEntity()
-// (events without lat/lon are hidden on the globe).
-pub fn test_events() -> Vec<LightningEvent> {
-    vec![
-        LightningEvent {
-            event_id: "test-001".to_string(),
-            sensor_id: 1,
-            t_v: 1759090000,
-            t_a: Some(1759090012),
-            delta_ms: Some(12000),
-            pixel_col: 320,
-            confidence: 85,
-            flags: 0b111, // Flash=1, Line=1, Thunder=1
-            lat: Some(37.7749),
-            lon: Some(-122.4194),
-        },
-        LightningEvent {
-            event_id: "test-002".to_string(),
-            sensor_id: 2,
-            t_v: 1759090060,
-            t_a: Some(1759090075),
-            delta_ms: Some(15000),
-            pixel_col: 410,
-            confidence: 42,
-            flags: 0b101, // Flash=1, Line=0, Thunder=1
-            lat: Some(37.3382),
-            lon: Some(-121.8863),
-        },
-        LightningEvent {
-            event_id: "test-003".to_string(),
-            sensor_id: 1,
-            t_v: 1759090120,
-            t_a: None, // 5-byte no-thunder variant
-            delta_ms: None,
-            pixel_col: 288,
-            confidence: 95,
-            flags: 0b011, // Flash=1, Line=1, Thunder=0
-            lat: Some(38.5816),
-            lon: Some(-121.4944),
-        },
-    ]
+        state: GspState::Candidate,
+        lat: Some(cfg.lat),
+        lon: Some(cfg.lon),
+        bearing_deg: cfg.bearing_deg,
+        fov_h_deg: cfg.fov_h_deg,
+        fov_v_deg: cfg.fov_v_deg,
+        nominal_range_m: cfg.nominal_range_m,
+    };
+    evt.state = evt.classify();
+    Ok(evt)
 }
 
 // --- 3. state + constructor: everything the actor remembers between msgs ---
@@ -274,27 +301,41 @@ pub struct IngestActor {
     pub last_event: Option<LightningEvent>, // simple "store" for now
     pub sensors: std::collections::HashMap<u16, SensorState>, // sensor_id -> health
     pub status_seen: u64,
+    history: Arc<Mutex<Vec<LightningEvent>>>,
+    lora: LoraConfig, // field registry + bridge settings from lora.ron
 }
 
 impl IngestActor {
-    pub fn new(hserver: ActorHandle<SpaServerMsg>) -> Self {
+    pub fn new(hserver: ActorHandle<SpaServerMsg>, history: Arc<Mutex<Vec<LightningEvent>>>, lora: LoraConfig) -> Self {
+        if lora.version != "gsp-lora/v1" {
+            println!("ingest WARNING: lora.ron version '{}' != 'gsp-lora/v1', bit map may mismatch", lora.version);
+        }
         Self { hserver, events_seen: 0, quarantined: 0, last_event: None,
-               sensors: std::collections::HashMap::new(), status_seen: 0 }
+               sensors: std::collections::HashMap::new(), status_seen: 0, history, lora}
     }
 
     fn store(&mut self, evt: LightningEvent) {
         // TODO: replace with DB / forward to GSP estimator + odin_server BroadcastWsMsg
+        // NOTE: println! (not info!) — the tracing subscriber stays silent in this
+        // setup (see ODIN_TRACE thread), but stdout demonstrably reaches the terminal.
         match WsMsg::json(GspService::mod_path(), "gsp", &evt) {
             Ok(ws_msg) => {
                 if let Err(e) = self.hserver.try_send_msg(BroadcastWsMsg{ws_msg}) {
-                    warn!("broadcast failed: {}", e);
+                    println!("ingest broadcast failed: {}", e);
                 }
             }
-            Err(e) => warn!("ws json failed: {}", e),
+            Err(e) => println!("ingest ws json failed: {}", e),
         }
 
-        info!("ingest store sensor={} dt={:?}ms pix={} conf={} flags={:#05b}",
-            evt.sensor_id, evt.delta_ms, evt.pixel_col, evt.confidence, evt.flags);
+            let mut past = self.history.lock().unwrap();
+            past.push(evt.clone()); // clone: println!/last_event below still need evt
+            if past.len() > 200 {
+                past.remove(0); // drop oldest, cap memory (mirrors gsp.js FUN-F6-004 cap)
+            }
+        let dt = evt.delta_ms.map(|d| format!("{}ms", d)).unwrap_or_else(|| "-".to_string());
+        println!("ingest store sensor={} dt={} pix={} conf={} flags={:#05b} state={:?}",
+            evt.sensor_id, dt, evt.pixel_col, evt.confidence, evt.flags, evt.state);
+
         self.last_event = Some(evt);
         self.events_seen += 1;
     }
@@ -310,25 +351,25 @@ impl IngestActor {
         self.status_seen += 1;
 
         if st.battery_low {
-            warn!("sensor {} battery critical", st.sensor_id);
+            println!("ingest sensor {} battery critical", st.sensor_id);
         }
 
         match WsMsg::json(GspService::mod_path(), "status", &st) {
             Ok(ws_msg) => {
                 if let Err(e) = self.hserver.try_send_msg(BroadcastWsMsg{ws_msg}) {
-                    warn!("status broadcast failed: {}", e);
+                    println!("ingest status broadcast failed: {}", e);
                 }
             }
-            Err(e) => warn!("status ws json failed: {}", e),
+            Err(e) => println!("ingest status ws json failed: {}", e),
         }
-        info!("ingest status sensor={} battery={:?} low_power={} battery_low={}",
+        println!("ingest status sensor={} battery={:?} low_power={} battery_low={}",
             st.sensor_id, st.battery_pct, st.low_power, st.battery_low);
     }
 
     fn quarantine(&mut self, reason: &str, raw: &[u8]) {
         // FUN-F4-004: never silently drop — count + log with reason
         self.quarantined += 1;
-        warn!("ingest quarantine ({}), {} bytes: {:02x?}", reason, raw.len(), raw);
+        println!("ingest quarantine ({}), {} bytes: {:02x?}", reason, raw.len(), raw);
     }
 }
 
@@ -336,54 +377,48 @@ impl IngestActor {
 // cont! = keep running, stop! = stop actor, term! = request system termination
 impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
     _Start_ => cont! {
-        info!("IngestActor started");
-        // push hardcoded test data so the webpage has something to display
-        for evt in test_events() {
-            match evt.validate() {
-                Ok(()) => self.store(evt),
-                Err(e) => warn!("quarantine test event: {}", e),
-            }
-        }
+        println!("IngestActor started");
     }
     LoraPacket => cont! {
-        // Branch on Flash bit (byte 0, bit 0): 1 = lightning event, 0 = status.
-        // TODO (gateway bridge): replace sensor_id/t_rx/lat/lon with DevEUI registry
-        // lookup + gateway timestamp. Currently stubbed for local testing.
-        if msg.0.is_empty() {
-            self.quarantine("empty packet", &msg.0);
-        } else {
-            let t_rx = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-            if msg.0[0] & 0x01 != 0 {
-                match decode_lora(&msg.0, 0, t_rx, None, None) {
+        // Real path: bridge supplies DevEUI + gateway t_rx; look up sensor_id/cfg.
+        if msg.bytes.is_empty() {
+            self.quarantine("empty packet", &msg.bytes);
+        } else if let Some((sensor_id, cfg)) = self.lora.by_deveui(&msg.dev_eui) {
+            let cfg = cfg.clone();
+            let t_rx = msg.t_rx;
+            if msg.bytes[0] & 0x01 != 0 {
+                match decode_lora(&msg.bytes, sensor_id, t_rx, &cfg) {
                     Ok(evt) => match evt.validate() {
                         Ok(()) => self.store(evt),
-                        Err(e) => self.quarantine(&e.to_string(), &msg.0),
+                        Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
                     },
-                    Err(e) => self.quarantine(&e.to_string(), &msg.0),
+                    Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
                 }
             } else {
-                match decode_status(&msg.0, 0, t_rx) {
+                match decode_status(&msg.bytes, sensor_id, t_rx) {
                     Ok(st) => match st.validate() {
                         Ok(()) => self.store_status(st),
-                        Err(e) => self.quarantine(&e.to_string(), &msg.0),
+                        Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
                     },
-                    Err(e) => self.quarantine(&e.to_string(), &msg.0),
+                    Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
                 }
             }
+        } else {
+            let reason = format!("unknown deveui {}", msg.dev_eui);
+            self.quarantine(&reason, &msg.bytes);
         }
     }
     SensorEvent => cont! {
         match msg.0.validate() {
             Ok(()) => self.store(msg.0),
-            Err(e) => warn!("quarantine decoded event {}: {}", msg.0.event_id, e),
+            Err(e) => println!("ingest quarantine decoded event {}: {}", msg.0.event_id, e),
         }
     }
     SensorStatusMsg => cont! {
         // direct injection path for tests (mirrors SensorEvent).
         match msg.0.validate() {
             Ok(()) => self.store_status(msg.0),
-            Err(e) => warn!("quarantine status sensor {}: {}", msg.0.sensor_id, e),
+            Err(e) => println!("ingest quarantine status sensor {}: {}", msg.0.sensor_id, e),
         }
     }
     SendCommand => cont! {
@@ -397,7 +432,7 @@ impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
                     msg.sensor_id, msg.cmd, bytes.len());
                 // TODO: self.tx_to_bridge.send(bytes).await
             }
-            Err(e) => warn!("bad command sensor {}: {}", msg.sensor_id, e),
+            Err(e) => println!("ingest bad command sensor {}: {}", msg.sensor_id, e),
         }
     }
 }
@@ -412,13 +447,25 @@ mod tests {
         [b, vec![c]].concat()
     }
 
+    fn test_cfg() -> SensorConfig {
+        SensorConfig {
+            dev_eui: "TEST".to_string(),
+            lat: 37.0, lon: -122.0, alt: 10.0,
+            bearing_deg: 270.0, fov_h_deg: 60.0, fov_v_deg: 40.0,
+            nominal_range_m: 5000, armed: true, sensitivity: 1,
+        }
+    }
+
     #[test]
     fn decode_5b_no_thunder() {
         let raw = pkt5(0b011, 95, 288);
-        let e = decode_lora(&raw, 1, 1759090120, None, None).unwrap();
+        let e = decode_lora(&raw, 1, 1759090120, &test_cfg()).unwrap();
         assert_eq!(e.pixel_col, 288);
         assert_eq!((e.t_a, e.delta_ms), (None, None));
         e.validate().unwrap();
+        assert_eq!(e.state, GspState::Probable);
+        assert_eq!((e.lat, e.lon), (Some(37.0), Some(-122.0)));
+        assert_eq!(e.bearing_deg, 270.0);
     }
 
     #[test]
@@ -428,10 +475,11 @@ mod tests {
         raw.extend(12000u32.to_le_bytes());
         let c = raw.iter().fold(0u8, |a, x| a ^ x);
         raw.push(c);
-        let e = decode_lora(&raw, 1, 1759090000, None, None).unwrap();
+        let e = decode_lora(&raw, 1, 1759090000, &test_cfg()).unwrap();
         assert_eq!(e.delta_ms, Some(12000));
         assert_eq!(e.t_a, Some(1759090012));
         e.validate().unwrap();
+        assert_eq!(e.state, GspState::Confirmed);
     }
 
     #[test]
@@ -449,7 +497,7 @@ mod tests {
     #[test]
     fn reserved_bits_rejected() {
         let raw = pkt5(0b011 | 0x08, 95, 288); // reserved bit3 set
-        assert!(decode_lora(&raw, 1, 1, None, None).is_err());
+        assert!(decode_lora(&raw, 1, 1, &test_cfg()).is_err());
     }
 
     #[test]

@@ -2,10 +2,16 @@ use async_trait::async_trait;
 use odin_actor::prelude::*;
 use odin_server::prelude::*;
 use odin_cesium::ImgLayerService;
+use std::sync::{Arc, Mutex};
 
-pub struct GspService;
+pub struct GspService{
+      history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>,
+}
+
 impl GspService {
-    pub fn new() -> Self { GspService }
+      pub fn new(history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>) -> Self {
+      GspService { history }
+  }
 }
 #[async_trait]
 impl SpaService for GspService {
@@ -25,9 +31,10 @@ impl SpaService for GspService {
     // send hardcoded test data to each newly connected browser so the
     // webpage shows points immediately (broadcasts sent before a client
     // connects are lost, direct sends here are not)
-    for evt in crate::ingest::test_events() {
-      let msg = WsMsg::json(Self::mod_path(), "gsp", &evt)?;
-      let _ = conn.send(msg).await;
+    let past = self.history.lock().unwrap().clone();
+    for evt in past {
+        let msg = WsMsg::json(Self::mod_path(), "gsp", &evt)?;
+        let _ = conn.send(msg).await;
     }
     Ok(())
   }

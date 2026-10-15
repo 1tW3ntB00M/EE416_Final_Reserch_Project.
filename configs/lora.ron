@@ -1,0 +1,35 @@
+LoraConfig(
+    version: "gsp-lora/v1",
+    bridge: Mqtt(
+        broker: "mqtt://127.0.0.1:1884",   // local test on 1884 (1883 taken by system service)
+        uplink_topic: "application/+/device/+/event/up",
+        downlink_topic: "application/1/device/{dev_eui}/command/down",
+    ),
+    sensors: {
+        // key = sensor_id as string (RON maps need string keys)
+        "1": SensorConfig(
+            dev_eui: "70B3D57ED0000001",      // from the Pi member / device label
+            lat: 37.7749, lon: -122.4194, alt: 120.0,  // surveyed install position
+            bearing_deg: 270.0,              // camera facing west
+            fov_h_deg: 60.0, fov_v_deg: 40.0,
+            nominal_range_m: 5000,           // CONFIRMED-dot distance + cone length
+            armed: true, sensitivity: 2,
+        ),
+        "2": SensorConfig(
+            dev_eui: "0000000000000002",      // test sensor at 0,0
+            lat: 0.0, lon: 0.0, alt: 0.0,
+            bearing_deg: 0.0,
+            fov_h_deg: 60.0, fov_v_deg: 40.0,
+            nominal_range_m: 5000,
+            armed: true, sensitivity: 2,
+        ),
+        "99": SensorConfig(                  // your simulated sensor, keep for testing
+            dev_eui: "SIMULATED",
+            lat: 37.5699, lon: -122.3131, alt: 50.0,
+            bearing_deg: 0.0,
+            fov_h_deg: 60.0, fov_v_deg: 40.0,
+            nominal_range_m: 5000,
+            armed: true, sensitivity: 2,
+        ),
+    },
+)
