@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 
 pub struct GspService{
       history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>,
+      lora: crate::ingest::LoraConfig,
 }
 
 impl GspService {
-      pub fn new(history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>) -> Self {
-      GspService { history }
+      pub fn new(history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>, lora: crate::ingest::LoraConfig) -> Self {
+      GspService { history, lora }
   }
 }
 #[async_trait]
@@ -28,9 +29,14 @@ impl SpaService for GspService {
     true
   }
   async fn init_connection (&mut self, _hself: &ActorHandle<SpaServerMsg>, _is_data_available: bool, conn: &mut WsConnection) -> OdinServerResult<()> {
-    // send hardcoded test data to each newly connected browser so the
-    // webpage shows points immediately (broadcasts sent before a client
-    // connects are lost, direct sends here are not)
+    // 1. registered sensors first so the browser can draw persistent blue
+    // dots + grey baseline FOV cones before any event arrives.
+    let sensors = self.lora.sensor_list();
+    println!("gsp init_connection: sending {} sensors + {} history events", sensors.len(), self.history.lock().unwrap().len());
+    let msg = WsMsg::json(Self::mod_path(), "sensors", &sensors)?;
+    let _ = conn.send(msg).await;
+    // 2. replay recent events so the webpage shows points immediately
+    // (broadcasts sent before a client connects are lost, direct sends here are not)
     let past = self.history.lock().unwrap().clone();
     for evt in past {
         let msg = WsMsg::json(Self::mod_path(), "gsp", &evt)?;

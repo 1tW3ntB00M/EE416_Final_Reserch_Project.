@@ -18,7 +18,8 @@ run_actor_system!(actor_system => {
     let hserver = pre_server.to_actor_handle();
     let svc_list = SpaServiceList::new();
     let svc_history = history.clone();
-    let svc_list = svc_list.add(build_service!(=> GspService::new(svc_history)));
+    let gsp_lora = lora.clone();
+    let svc_list = svc_list.add(build_service!(=> GspService::new(svc_history, gsp_lora)));
 
     let _hserver = spawn_pre_actor!(actor_system, pre_server, SpaServer::new(
         odin_server::load_config("spa_server.ron")?,

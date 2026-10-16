@@ -21,7 +21,9 @@ odinCesium.addDataSource(dataSource);
 
 let events = []; // newest last
 let selected = undefined;
-let cones = new Map(); // sensor_id -> FoV cone entity
+let sensors = new Map(); // sensor_id -> SensorInfo registry (persistent)
+let sensorDots = new Map(); // sensor_id -> blue dot entity (always visible)
+let cones = new Map(); // sensor_id -> FoV cone entity (grey baseline, state-tinted)
 
 createIcon();
 createWindow();
@@ -30,46 +32,160 @@ odinCesium.setEntitySelectionHandler(gspSelection);
 odinCesium.initLayerPanel("gsp", config, showGsp);
 console.log("gsp initialized");
 
-function getOrCreateCone(sensor_id) {
-    return cones.get(sensor_id); // may be undefined: call ensureCone(evt) instead
+// --- persistent sensors: blue dot + grey baseline cone, always visible ---
+
+function sensorFromEvent(evt) {
+    // LightningEvent carries sensor geometry (copied from lora.ron at decode
+    // time); evt.lat/lon is the sensor position (strike estimate is derived
+    // separately in strikePos()). Returns undefined if geometry is missing.
+    if (evt.lat === undefined || evt.lon === undefined ||
+        evt.bearing_deg === undefined || evt.fov_h_deg === undefined ||
+        evt.nominal_range_m === undefined) return undefined;
+    return {
+        sensor_id: evt.sensor_id,
+        lat: evt.lat,
+        lon: evt.lon,
+        alt: 0,
+        bearing_deg: evt.bearing_deg,
+        fov_h_deg: evt.fov_h_deg,
+        fov_v_deg: evt.fov_v_deg,
+        nominal_range_m: evt.nominal_range_m,
+    };
 }
 
-// (Re)build the FoV wedge for an event, hierarchy set at construction time
-// (post-hoc polygon.hierarchy assignment does not reliably update in Cesium).
-// Cheap enough to recreate per event: ≤20 sensors, seconds between updates.
-function ensureCone(evt) {
-    if (evt.bearing_deg === undefined || evt.fov_h_deg === undefined ||
-        evt.nominal_range_m === undefined) return undefined;
-    const half = evt.fov_h_deg / 2;
-    const [latL, lonL] = destPoint(evt.lat, evt.lon, evt.bearing_deg - half, evt.nominal_range_m);
-    const [latR, lonR] = destPoint(evt.lat, evt.lon, evt.bearing_deg + half, evt.nominal_range_m);
-    const positions = Cesium.Cartesian3.fromDegreesArray(
-        [evt.lon, evt.lat, lonL, latL, lonR, latR]);
-    console.log("cone update sensor=" + evt.sensor_id + " positions=" + positions.length +
-        " state=" + evt.state);
+function ensureSensorEntities(sensor) {
+    if (!sensor || sensor.lat === undefined || sensor.lon === undefined) return;
+    sensors.set(sensor.sensor_id, sensor);
+    // blue dot at sensor location (never recolored by event state)
+    if (!sensorDots.has(sensor.sensor_id)) {
+        const pos = Cesium.Cartesian3.fromDegrees(sensor.lon, sensor.lat, 0);
+        const dot = dataSource.entities.add({
+            id: "sensor-" + sensor.sensor_id,
+            position: pos,
+            point: {
+                pixelSize: config.sensorPointSize,
+                color: config.sensorColor,
+                outlineColor: config.sensorOutline,
+                outlineWidth: config.sensorOutlineWidth,
+                distanceDisplayCondition: config.pointDC,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+            label: {
+                text: String(sensor.sensor_id),
+                scale: 0.8,
+                horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+                verticalOrigin: Cesium.VerticalOrigin.TOP,
+                pixelOffset: new Cesium.Cartesian2(8, -8),
+                fillColor: config.sensorColor,
+                showBackground: false,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+        });
+        dot._sensorId = sensor.sensor_id;
+        sensorDots.set(sensor.sensor_id, dot);
+    }
+    // grey baseline cone if none exists yet for this sensor
+    if (!cones.has(sensor.sensor_id)) {
+        updateCone(sensor, config.coneIdleColor, undefined);
+    }
+    odinCesium.requestRender();
+}
 
-    let cone = cones.get(evt.sensor_id);
-    if (cone) dataSource.entities.remove(cone);
+function handleSensors(list) {
+    console.log("gsp sensors received: " + (Array.isArray(list) ? list.length : typeof list));
+    if (!Array.isArray(list)) return;
+    for (const s of list) ensureSensorEntities(s);
+    console.log("gsp sensor dots: " + sensorDots.size + " cones: " + cones.size);
+}
+
+function coneColorForState(state) {
+    switch (state) {
+        case "Confirmed": return config.coneConfirmedColor;
+        case "Probable": return config.coneProbableColor;
+        case "Candidate": return config.coneCandidateColor;
+        default: return config.coneIdleColor;
+    }
+}
+
+function buildConePositions(lat, lon, bearing_deg, fov_h_deg, range_m) {
+    // Circular sector (not a triangle): a centerline strike at full range
+    // would otherwise fall past the triangle's straight base edge.
+    const half = fov_h_deg / 2;
+    const segs = 32;
+    const flat = [lon, lat]; // apex first, then arc edge-to-edge
+    for (let i = 0; i <= segs; i++) {
+        const b = bearing_deg - half + (fov_h_deg * i) / segs;
+        const [la, lo] = destPoint(lat, lon, b, range_m);
+        flat.push(lo, la);
+    }
+    return Cesium.Cartesian3.fromDegreesArray(flat);
+}
+
+function updateCone(sensor, color, evt) {
+    const positions = buildConePositions(
+        sensor.lat, sensor.lon, sensor.bearing_deg, sensor.fov_h_deg, sensor.nominal_range_m);
+    console.log("cone update sensor=" + sensor.sensor_id + " positions=" + positions.length +
+        " state=" + (evt ? evt.state : "idle"));
+    const old = cones.get(sensor.sensor_id);
+    if (old) dataSource.entities.remove(old);
     // NOTE: wedge shows the LATEST event for this sensor (cones are per-sensor,
     // dots are per-event). Clicking the wedge selects that latest event.
-    // (_evt assigned after construction: the Entity constructor ignores
-    // unknown options, same as the dot entities below do with e._evt.)
-    cone = dataSource.entities.add({
-        id: "cone-" + evt.sensor_id,
+    const cone = dataSource.entities.add({
+        id: "cone-" + sensor.sensor_id,
         polygon: {
             hierarchy: new Cesium.PolygonHierarchy(positions),
             height: 0,
             // clamped to terrain: without this the wedge sits at ellipsoid
             // height 0, i.e. UNDER the terrain, and is invisible
             heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-            material: confColor(evt).withAlpha(0.3), // tint with state color
+            material: color.withAlpha(config.coneAlpha),
             outline: true,
             outlineColor: Cesium.Color.BLACK,
         }
     });
-    cone._evt = evt;
-    cones.set(evt.sensor_id, cone);
+    if (evt) cone._evt = evt;
+    cones.set(sensor.sensor_id, cone);
     return cone;
+}
+
+// Strike position for a Confirmed event: backend-provided strike_lat/lon wins
+// when present; otherwise estimate along the pixel-derived azimuth at
+// nominal_range so the red dot lands inside the red cone.
+function strikePos(evt, sensor) {
+    if (evt.strike_lat !== undefined && evt.strike_lon !== undefined) {
+        return Cesium.Cartesian3.fromDegrees(evt.strike_lon, evt.strike_lat, 0);
+    }
+    if (sensor && sensor.lat !== undefined && sensor.bearing_deg !== undefined) {
+        const cols = config.sensorCols || 640;
+        const pix = Math.min(Math.max(evt.pixel_col || 0, 0), cols);
+        const az = sensor.bearing_deg - sensor.fov_h_deg / 2 + (pix / cols) * sensor.fov_h_deg;
+        // Estimated range pulls slightly inside the sector arc (x0.92) so the
+        // dot reads as inside, not straddling the edge. Explicit backend
+        // strike_lat/lon or strike_range_m above are honored verbatim.
+        const range = (evt.strike_range_m !== undefined ? evt.strike_range_m : sensor.nominal_range_m) * 0.92;
+        const [sLat, sLon] = destPoint(sensor.lat, sensor.lon, az, range);
+        return Cesium.Cartesian3.fromDegrees(sLon, sLat, 0);
+    }
+    if (evt.lat !== undefined && evt.lon !== undefined) {
+        return Cesium.Cartesian3.fromDegrees(evt.lon, evt.lat, 0);
+    }
+    return Cesium.Cartesian3.fromDegrees(0, 0, 0);
+}
+
+function getOrCreateCone(sensor_id) {
+    return cones.get(sensor_id); // may be undefined: call updateCone/ensureSensorEntities instead
+}
+
+// (Re)build the FoV wedge for an event, hierarchy set at construction time
+// (post-hoc polygon.hierarchy assignment does not reliably update in Cesium).
+// Cheap enough to recreate per event: ≤20 sensors, seconds between updates.
+function ensureCone(evt) {
+    const sensor = sensors.get(evt.sensor_id) || sensorFromEvent(evt);
+    if (sensor) ensureSensorEntities(sensor);
+    const s = sensors.get(evt.sensor_id);
+    if (!s) return undefined;
+    return updateCone(s, coneColorForState(evt.state), evt);
 }
 
 // great-circle destination: point distM meters from (lat,lon) along bearingDeg
@@ -122,50 +238,51 @@ function initEventView() {
     return view;
 }
 
-// --- Cesium entities (red dot for confirmed strikes, no uncertainty ellipse) ---
+// --- Cesium entities: blue sensor dot (always), grey/yellow/orange/red cone,
+// red strike dot only for Confirmed ---
 
-function confColor(evt) {
-    if (evt.lat === undefined || evt.lon === undefined) return config.unlocatedColor;
-    switch (evt.state) {
-        case "Confirmed": return Cesium.Color.fromCssColorString('#FF0000'); // red dot
-        case "Probable":  return Cesium.Color.fromCssColorString('#FFA500'); // orange
-        default:          return Cesium.Color.fromCssColorString('#FFFF00'); // yellow
-    }
+function strikeDotColor() {
+    return config.strikeColor;
 }
 
 function upsertEntity(evt) {
+    // 1. make sure the persistent sensor dot + cone exist, then tint the cone
+    // by event state: grey idle, yellow candidate, orange probable, red confirmed.
+    const derived = sensorFromEvent(evt);
+    if (derived && !sensors.has(evt.sensor_id)) ensureSensorEntities(derived);
+    const sensor = sensors.get(evt.sensor_id) || derived;
+    if (sensor) updateCone(sensor, coneColorForState(evt.state), evt);
+
+    // 2. strike dot: red dot inside the cone, Confirmed only.
     const id = evt.event_id;
     let e = dataSource.entities.getById(id);
-    const hasPos = evt.lat !== undefined && evt.lon !== undefined;
-    // BR-F5-01: red dot only for CONFIRMED; CANDIDATE/PROBABLE are wedge-only.
-    const showDot = hasPos && evt.state === "Confirmed";
-    const pos = hasPos
-        ? Cesium.Cartesian3.fromDegrees(evt.lon, evt.lat, 0)
-        : Cesium.Cartesian3.fromDegrees(0, 0, 0); // unlocated: hidden until solved
+    const isConfirmed = evt.state === "Confirmed";
+    const hasPos = isConfirmed && sensor !== undefined;
+    const pos = hasPos ? strikePos(evt, sensor) : Cesium.Cartesian3.fromDegrees(0, 0, 0);
 
     if (e) {
         e.position = pos;
-        e.point.color = confColor(evt);
-        e.show = showDot;
+        e.show = isConfirmed;
         e._evt = evt;
     } else {
         e = new Cesium.Entity({
             id,
             position: pos,
-            show: showDot,
+            show: isConfirmed,
             point: {
                 pixelSize: config.pointSize,
-                color: confColor(evt),
+                color: strikeDotColor(),
                 outlineColor: config.pointOutline,
                 outlineWidth: config.outlineWidth,
                 distanceDisplayCondition: config.pointDC,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
             },
             description: describe(evt),
         });
         e._evt = evt;
         dataSource.entities.add(e);
     }
-    if (hasPos) ensureCone(evt);
     odinCesium.requestRender();
 }
 
@@ -180,12 +297,19 @@ function describe(evt) {
     return `sensor ${evt.sensor_id}<br>Tv ${t}<br>dt ${evt.delta_ms}ms<br>pix ${evt.pixel_col} conf ${evt.confidence}${batt}`;
 }
 
+// Plain-text variant for the VarText detail panel (single-line, no HTML).
+function describeText(evt) {
+    return describe(evt).replace(/<br>/g, " | ");
+}
+
 let healthBySensor = new Map(); // sensor_id -> latest status msg
 
 // --- ws messages ---
 
 function handleWsMessages(msgType, msg) {
-    if (msgType === "gsp" || msgType === "event") {
+    if (msgType === "sensors") {
+        handleSensors(msg);
+    } else if (msgType === "gsp" || msgType === "event") {
         handleEvent(msg);
     } else if (msgType === "status") {
         handleStatus(msg);
@@ -196,7 +320,7 @@ function handleStatus(st) {
     healthBySensor.set(st.sensor_id, st);
     // refresh detail view if it currently shows an event from this sensor
     if (selected && selected.sensor_id === st.sensor_id) {
-        ui.setVarText(ui.getVarText("gsp.detail"), describe(selected));
+        ui.setVarText(ui.getVarText("gsp.detail"), describeText(selected));
     }
 }
 
@@ -212,17 +336,34 @@ function handleEvent(evt) {
 
 function selectEvent(event) {
     selected = event.detail.curSelection;
-    ui.setVarText(ui.getVarText("gsp.detail"), selected ? describe(selected) : null);
+    ui.setVarText(ui.getVarText("gsp.detail"), selected ? describeText(selected) : null);
 }
 
 function zoomToEvent(event) {
     const lv = ui.getList(event);
     const evt = lv ? ui.getSelectedListItem(lv) : selected;
-    if (evt && evt.lat !== undefined) {
-        odinCesium.zoomTo(Cesium.Cartesian3.fromDegrees(evt.lon, evt.lat, config.zoomHeight));
-        const e = dataSource.entities.getById(evt.event_id);
-        if (e) odinCesium.setSelectedEntity(e);
+    if (!evt) return;
+    const sensor = sensors.get(evt.sensor_id) || sensorFromEvent(evt);
+    let target;
+    if (evt.state === "Confirmed" && sensor) {
+        target = strikePos(evt, sensor);
+    } else if (sensor) {
+        target = Cesium.Cartesian3.fromDegrees(sensor.lon, sensor.lat, config.zoomHeight);
+        odinCesium.zoomTo(target);
+        const cone = cones.get(evt.sensor_id);
+        if (cone) odinCesium.setSelectedEntity(cone);
+        return;
+    } else if (evt.lat !== undefined) {
+        target = Cesium.Cartesian3.fromDegrees(evt.lon, evt.lat, config.zoomHeight);
+    } else {
+        return;
     }
+    // raise the strike target to zoom height for the camera move
+    const carto = Cesium.Cartographic.fromCartesian(target);
+    target = Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, config.zoomHeight);
+    odinCesium.zoomTo(target);
+    const e = dataSource.entities.getById(evt.event_id);
+    if (e) odinCesium.setSelectedEntity(e);
 }
 
 function toggleShowGsp(event) {
