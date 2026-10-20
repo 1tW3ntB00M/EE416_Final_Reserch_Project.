@@ -131,6 +131,13 @@ impl LoraConfig {
             }
         })
     }
+
+    /// reverse of `by_deveui`: resolve a configured sensor_id to its DevEUI.
+    /// DevEUI is the addressing key for downlink MQTT topics (lora.ron), and
+    /// commands arrive as sensor_id — so the downlink lane needs this lookup.
+    pub fn deveui_of(&self, sensor_id: u16) -> Option<String> {
+        self.sensors.get(&sensor_id.to_string()).map(|cfg| cfg.dev_eui.clone())
+    }
 }
 
 impl SensorStatus {
@@ -195,6 +202,13 @@ pub struct SendCommand {
     pub arg: u8,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReceiveCommand {
+    pub sensor_id: u16,
+    pub cmd: SensorCommandKind,
+    pub arg: u8
+}
+
 impl SendCommand {
     pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
         let op = match self.cmd {
@@ -209,6 +223,31 @@ impl SendCommand {
             }
         };
         Ok(vec![op, self.arg])
+    }
+}
+
+impl ReceiveCommand {
+    /// inverse of `SendCommand::encode()`: parse the 2-byte downlink
+    /// `[opcode, arg]`. `sensor_id` is NOT on the wire, so the caller supplies
+    /// it from the DevEUI registry (same split as decode_lora/decode_status).
+    pub fn decode(bytes: &[u8], sensor_id: u16) -> anyhow::Result<Self> {
+        if bytes.len() != 2 {
+            anyhow::bail!("command packet must be 2 bytes, got {}", bytes.len());
+        }
+        let (op, arg) = (bytes[0], bytes[1]);
+        let cmd = match op {
+            0x01 => SensorCommandKind::Sleep,
+            0x02 => SensorCommandKind::Arm,
+            0x03 => SensorCommandKind::Disarm,
+            0x04 => {
+                if !(1..=30).contains(&arg) {
+                    anyhow::bail!("window must be 1-30s, got {}", arg);
+                }
+                SensorCommandKind::SetWindow
+            }
+            _ => anyhow::bail!("unknown command opcode {:#04x}", op),
+        };
+        Ok(ReceiveCommand { sensor_id, cmd, arg })
     }
 }
 
@@ -336,15 +375,21 @@ pub struct IngestActor {
     pub status_seen: u64,
     history: Arc<Mutex<Vec<LightningEvent>>>,
     lora: LoraConfig, // field registry + bridge settings from lora.ron
+    tx_to_bridge: MpscSender<(String, Vec<u8>)>, // downlink TX lane into the gateway bridge (dev_eui, encoded bytes)
 }
 
 impl IngestActor {
-    pub fn new(hserver: ActorHandle<SpaServerMsg>, history: Arc<Mutex<Vec<LightningEvent>>>, lora: LoraConfig) -> Self {
+    pub fn new(
+        hserver: ActorHandle<SpaServerMsg>,
+        history: Arc<Mutex<Vec<LightningEvent>>>,
+        lora: LoraConfig,
+        tx_to_bridge: MpscSender<(String, Vec<u8>)>,
+    ) -> Self {
         if lora.version != "gsp-lora/v1" {
             println!("ingest WARNING: lora.ron version '{}' != 'gsp-lora/v1', bit map may mismatch", lora.version);
         }
         Self { hserver, events_seen: 0, quarantined: 0, last_event: None,
-               sensors: std::collections::HashMap::new(), status_seen: 0, history, lora}
+               sensors: std::collections::HashMap::new(), status_seen: 0, history, lora, tx_to_bridge}
     }
 
     fn store(&mut self, evt: LightningEvent) {
@@ -455,15 +500,22 @@ impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
         }
     }
     SendCommand => cont! {
-        // Downlink skeleton: encode + hand to the gateway bridge TX lane.
-        // The bridge task (MQTT/serial, not yet spawned — see main.rs TODO) will
-        // own the actual socket; this just validates + logs for now.
+        // Downlink: encode, resolve the target DevEUI, and hand (dev_eui, bytes)
+        // to the gateway bridge TX lane. The bridge owns the MQTT socket and the
+        // {dev_eui} topic substitution — we only address the device here.
         // NOTE: SendCommand is a named-field struct, so fields live on `msg` directly.
         match msg.encode() {
             Ok(bytes) => {
-                info!("command queued sensor={} {:?} ({} bytes, bridge TODO)",
-                    msg.sensor_id, msg.cmd, bytes.len());
-                // TODO: self.tx_to_bridge.send(bytes).await
+                match self.lora.deveui_of(msg.sensor_id) {
+                    Some(dev_eui) => {
+                        info!("command queued sensor={} {:?} dev_eui={} ({} bytes)",
+                            msg.sensor_id, msg.cmd, dev_eui, bytes.len());
+                        if let Err(e) = self.tx_to_bridge.send((dev_eui, bytes)).await {
+                            println!("ingest bridge send failed sensor {}: {}", msg.sensor_id, e);
+                        }
+                    }
+                    None => println!("ingest no dev_eui for sensor {} — command dropped", msg.sensor_id),
+                }
             }
             Err(e) => println!("ingest bad command sensor {}: {}", msg.sensor_id, e),
         }
@@ -539,5 +591,19 @@ mod tests {
         assert_eq!(ok.encode().unwrap(), vec![0x04, 12]);
         let bad = SendCommand { sensor_id: 1, cmd: SensorCommandKind::SetWindow, arg: 31 };
         assert!(bad.encode().is_err());
+    }
+
+    #[test]
+    fn command_decode_roundtrip() {
+        let sent = SendCommand { sensor_id: 7, cmd: SensorCommandKind::SetWindow, arg: 12 };
+        let bytes = sent.encode().unwrap();
+        let recv = ReceiveCommand::decode(&bytes, sent.sensor_id).unwrap();
+        assert_eq!(recv.sensor_id, 7);
+        assert!(matches!(recv.cmd, SensorCommandKind::SetWindow));
+        assert_eq!(recv.arg, 12);
+
+        assert!(ReceiveCommand::decode(&[0xFF, 0], 1).is_err()); // unknown opcode
+        assert!(ReceiveCommand::decode(&[0x01], 1).is_err());    // wrong length
+        assert!(ReceiveCommand::decode(&[0x04, 31], 1).is_err()); // window out of range
     }
 }
