@@ -385,4 +385,3 @@ function gspSelection() {
     const sel = odinCesium.getSelectedEntity();
     if (sel && sel._evt) ui.setSelectedListItem(eventView, sel._evt);
 }
-
