@@ -1,7 +1,7 @@
 LoraConfig(
     version: "gsp-lora/v1",
     bridge: Mqtt(
-        broker: "mqtt://127.0.0.1:1885:1883",   // local test on 1884 (1883 taken by system service)
+        broker: "mqtt://127.0.0.1:1885",   // local test on 1884 (1883 taken by system service)
         uplink_topic: "application/+/device/+/event/up",
         downlink_topic: "application/1/device/{dev_eui}/command/down",
     ),
@@ -21,6 +21,14 @@ LoraConfig(
             bearing_deg: 0.0,
             fov_h_deg: 60.0, fov_v_deg: 40.0,
             nominal_range_m: 5000,
+            armed: true, sensitivity: 2,
+        ),
+        "3": SensorConfig(
+            dev_eui: "33B02BE3B605123C",
+            lat: 60.7749, lon: -140.4194, alt: 160.0,
+            bearing_deg: 270.0,
+            fov_h_deg: 60.0, fov_v_deg: 40.0,
+            nominal_range_m: 5000,           // CONFIRMED-dot distance + cone length
             armed: true, sensitivity: 2,
         ),
         "99": SensorConfig(                  // simulated sensor, keep for testing

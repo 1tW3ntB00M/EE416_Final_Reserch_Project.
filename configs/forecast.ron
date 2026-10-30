@@ -1,0 +1,6 @@
+ForecastConfig(
+  poll_secs: 900,
+  cape_threshold: 500.0,
+  horizon_hours: 6,
+  arm_profile: 2,
+)

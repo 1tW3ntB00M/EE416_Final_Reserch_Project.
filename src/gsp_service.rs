@@ -2,16 +2,15 @@ use async_trait::async_trait;
 use odin_actor::prelude::*;
 use odin_server::prelude::*;
 use odin_cesium::ImgLayerService;
-use std::sync::{Arc, Mutex};
 
 pub struct GspService{
-      history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>,
+      pool: sqlx::SqlitePool,
       lora: crate::ingest::LoraConfig,
 }
 
 impl GspService {
-      pub fn new(history: Arc<Mutex<Vec<crate::ingest::LightningEvent>>>, lora: crate::ingest::LoraConfig) -> Self {
-      GspService { history, lora }
+      pub fn new(pool: sqlx::SqlitePool, lora: crate::ingest::LoraConfig) -> Self {
+      GspService { pool, lora }
   }
 }
 #[async_trait]
@@ -32,12 +31,12 @@ impl SpaService for GspService {
     // 1. registered sensors first so the browser can draw persistent blue
     // dots + grey baseline FOV cones before any event arrives.
     let sensors = self.lora.sensor_list();
-    println!("gsp init_connection: sending {} sensors + {} history events", sensors.len(), self.history.lock().unwrap().len());
+    let past = crate::store::recent_events(&self.pool, 200).await.unwrap_or_default();
+    println!("gsp init_connection: sending {} sensors + {} history events", sensors.len(), past.len());
     let msg = WsMsg::json(Self::mod_path(), "sensors", &sensors)?;
     let _ = conn.send(msg).await;
     // 2. replay recent events so the webpage shows points immediately
     // (broadcasts sent before a client connects are lost, direct sends here are not)
-    let past = self.history.lock().unwrap().clone();
     for evt in past {
         let msg = WsMsg::json(Self::mod_path(), "gsp", &evt)?;
         let _ = conn.send(msg).await;

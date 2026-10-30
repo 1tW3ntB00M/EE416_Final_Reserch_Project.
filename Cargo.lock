@@ -4774,9 +4774,11 @@ dependencies = [
  "odin_common",
  "odin_openmeteo",
  "odin_server",
+ "reqwest",
  "rumqttc",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 

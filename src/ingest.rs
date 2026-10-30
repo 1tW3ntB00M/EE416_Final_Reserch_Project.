@@ -2,7 +2,6 @@ use odin_actor::prelude::*;
 use odin_server::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::gsp_service::GspService;
-use std::sync::{Arc, Mutex};
 
 // --- 1. messages this actor can receive: one struct per mailbox "slot" ---
 // Raw bytes as they arrive from the LoRa gateway (transport TBD - for now
@@ -75,6 +74,28 @@ impl LoraConfig {
 }
 
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatLonAlt { 
+    pub lat: f64, 
+    pub lon: f64, 
+    pub alt: f64 
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GspDisplayState {
+  pub event_id: String,      // links to LightningEvent
+  pub sensor_id: u16,
+  pub state: GspState,
+  pub wedge_color: String,   // e.g. "#FFFF00" — server decides, client renders
+  pub dot: Option<LatLonAlt>,// Some iff Confirmed; approximate nominal point
+  pub nominal_range_m: u32,  // input used for the dot
+  pub t_v: i64,              // keep time on the shown record
+  pub flags: u8,             // raw control bits {flash,edge,acoustic}
+  pub confidence: u8,        // 0-100
+  pub method_version: String,// e.g. "gsp-lora/v1:state-v1"
+}
+
+
 // Decoded + validated event, ready to log/store (and later forward to
 // odin_server / GSP estimator). Kept as separate message so you can inject
 // already-decoded events in tests without going through the bit decoder.
@@ -116,6 +137,90 @@ pub struct SensorStatus {
     pub low_power: bool,  // flags bit1
     pub battery_low: bool, // flags bit2 (low power due to battery)
     pub flags: u8,        // flags byte verbatim
+}
+
+impl GspDisplayState {
+  // Sole constructor — moves strikePos/wedge logic off gsp.js into Rust.
+  // Takes classified evt + registry cfg, computes wedge_color + dot (None unless Confirmed+valid dt).
+  pub fn from_event(evt: &LightningEvent, cfg: &SensorConfig, method_version: &str) -> Self {
+    // Downgrade invalid Confirmed to wedge-only (FUN-F5-005) rather than fabricating a dot.
+    let mut state = evt.state;
+    if state == GspState::Confirmed {
+      let dt_ok = match (evt.t_a, evt.delta_ms) {
+        (Some(t_a), Some(d)) => t_a > evt.t_v && d > 0 && d <= 60_000,
+        _ => false,
+      };
+      if !dt_ok {
+        state = GspState::UnlocatedCandidate;
+      }
+    }
+    let wedge_color = match state {
+      GspState::Candidate => "#FFFF00".to_string(),
+      GspState::Probable => "#FFA500".to_string(),
+      GspState::Confirmed => "#FF0000".to_string(),
+      GspState::UnlocatedCandidate => "#808080".to_string(),
+    };
+    let dot = if state == GspState::Confirmed {
+      // Nominal ground point: FoV-center ray at configured range, pulled slightly
+      // inside (x0.92) so the dot reads as inside the wedge (mirrors gsp.js strikePos).
+      let (lat, lon) = dest_point(cfg.lat, cfg.lon, cfg.bearing_deg as f64, cfg.nominal_range_m as f64 * 0.92);
+      Some(LatLonAlt { lat, lon, alt: cfg.alt })
+    } else {
+      None
+    };
+    Self {
+      event_id: evt.event_id.clone(),
+      sensor_id: evt.sensor_id,
+      state,
+      wedge_color,
+      dot,
+      nominal_range_m: cfg.nominal_range_m,
+      t_v: evt.t_v,
+      flags: evt.flags,
+      confidence: evt.confidence,
+      method_version: method_version.to_string(),
+    }
+  }
+
+  // Enforces DAT-004/F5-005: Confirmed requires a dot; anything else forbids one.
+  pub fn validate(&self) -> anyhow::Result<()> {
+    if self.event_id.is_empty() {
+      anyhow::bail!("empty event_id");
+    }
+    if self.method_version.is_empty() {
+      anyhow::bail!("empty method_version");
+    }
+    match self.state {
+      GspState::Confirmed => {
+        if self.dot.is_none() {
+          anyhow::bail!("Confirmed without dot");
+        }
+        Ok(())
+      }
+      _ => {
+        if self.dot.is_some() {
+          anyhow::bail!("{:?} must not carry a dot", self.state);
+        }
+        Ok(())
+      }
+    }
+  }
+
+  pub fn is_located(&self) -> bool {
+    matches!(self.state, GspState::Confirmed) && self.dot.is_some()
+  }
+}
+
+// Great-circle destination: mirrors assets/gsp.js destPoint.
+fn dest_point(lat_deg: f64, lon_deg: f64, bearing_deg: f64, dist_m: f64) -> (f64, f64) {
+  const R: f64 = 6_371_000.0;
+  let d = dist_m / R;
+  let br = bearing_deg.to_radians();
+  let la1 = lat_deg.to_radians();
+  let lo1 = lon_deg.to_radians();
+  let la2 = (la1.sin() * d.cos() + la1.cos() * d.sin() * br.cos()).asin();
+  let lo2 = lo1 + (br.sin() * d.sin() * la1.cos()).atan2(d.cos() - la1.sin() * la2.sin());
+  (la2.to_degrees(), lo2.to_degrees())
 }
 
 #[derive(Debug)]
@@ -256,7 +361,7 @@ impl ReceiveCommand {
 define_actor_msg_set! {pub IngestMsg = LoraPacket | SensorEvent | SensorStatusMsg | SendCommand}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GspState { Candidate, Probable, Confirmed }
+pub enum GspState { Candidate, Probable, Confirmed, UnlocatedCandidate }
 
 impl LightningEvent {
     // FUN-F4-004: schema / time-order validation. Invalid => quarantine, never panic.
@@ -373,7 +478,7 @@ pub struct IngestActor {
     pub last_event: Option<LightningEvent>, // simple "store" for now
     pub sensors: std::collections::HashMap<u16, SensorState>, // sensor_id -> health
     pub status_seen: u64,
-    history: Arc<Mutex<Vec<LightningEvent>>>,
+    pool: sqlx::SqlitePool,
     lora: LoraConfig, // field registry + bridge settings from lora.ron
     tx_to_bridge: MpscSender<(String, Vec<u8>)>, // downlink TX lane into the gateway bridge (dev_eui, encoded bytes)
 }
@@ -381,7 +486,7 @@ pub struct IngestActor {
 impl IngestActor {
     pub fn new(
         hserver: ActorHandle<SpaServerMsg>,
-        history: Arc<Mutex<Vec<LightningEvent>>>,
+        pool: sqlx::SqlitePool,
         lora: LoraConfig,
         tx_to_bridge: MpscSender<(String, Vec<u8>)>,
     ) -> Self {
@@ -389,10 +494,10 @@ impl IngestActor {
             println!("ingest WARNING: lora.ron version '{}' != 'gsp-lora/v1', bit map may mismatch", lora.version);
         }
         Self { hserver, events_seen: 0, quarantined: 0, last_event: None,
-               sensors: std::collections::HashMap::new(), status_seen: 0, history, lora, tx_to_bridge}
+               sensors: std::collections::HashMap::new(), status_seen: 0, pool, lora, tx_to_bridge}
     }
 
-    fn store(&mut self, evt: LightningEvent) {
+    async fn store (&mut self, evt: LightningEvent) -> anyhow::Result<()> {
         // TODO: replace with DB / forward to GSP estimator + odin_server BroadcastWsMsg
         // NOTE: println! (not info!) — the tracing subscriber stays silent in this
         // setup (see ODIN_TRACE thread), but stdout demonstrably reaches the terminal.
@@ -405,17 +510,22 @@ impl IngestActor {
             Err(e) => println!("ingest ws json failed: {}", e),
         }
 
-            let mut past = self.history.lock().unwrap();
-            past.push(evt.clone()); // clone: println!/last_event below still need evt
-            if past.len() > 200 {
-                past.remove(0); // drop oldest, cap memory (mirrors gsp.js FUN-F6-004 cap)
-            }
+        sqlx::query(
+        "INSERT OR REPLACE INTO events
+        (event_id,sensor_id,t_v,raw_json,created_at)
+        VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+        .bind(&evt.event_id).bind(evt.sensor_id as i64)
+        .bind(evt.t_v)
+        .bind(serde_json::to_string(&evt)?)
+        .execute(&self.pool).await?;
+
         let dt = evt.delta_ms.map(|d| format!("{}ms", d)).unwrap_or_else(|| "-".to_string());
         println!("ingest store sensor={} dt={} pix={} conf={} flags={:#05b} state={:?}",
             evt.sensor_id, dt, evt.pixel_col, evt.confidence, evt.flags, evt.state);
 
         self.last_event = Some(evt);
         self.events_seen += 1;
+        Ok(())
     }
 
     fn store_status(&mut self, st: SensorStatus) {
@@ -467,7 +577,11 @@ impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
             if msg.bytes[0] & 0x01 != 0 {
                 match decode_lora(&msg.bytes, sensor_id, t_rx, &cfg) {
                     Ok(evt) => match evt.validate() {
-                        Ok(()) => self.store(evt),
+                        Ok(()) => {
+                            if let Err(e) = self.store(evt).await {
+                                println!("ingest store failed: {}", e);
+                            }
+                        }
                         Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
                     },
                     Err(e) => self.quarantine(&e.to_string(), &msg.bytes),
@@ -488,7 +602,11 @@ impl_actor! { match msg for Actor<IngestActor, IngestMsg> as
     }
     SensorEvent => cont! {
         match msg.0.validate() {
-            Ok(()) => self.store(msg.0),
+            Ok(()) => {
+                if let Err(e) = self.store(msg.0).await {
+                    println!("ingest store failed: {}", e);
+                }
+            }
             Err(e) => println!("ingest quarantine decoded event {}: {}", msg.0.event_id, e),
         }
     }
