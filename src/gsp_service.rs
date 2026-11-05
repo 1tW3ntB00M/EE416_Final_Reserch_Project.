@@ -5,11 +5,11 @@ use odin_cesium::ImgLayerService;
 
 pub struct GspService{
       pool: sqlx::SqlitePool,
-      lora: crate::ingest::LoraConfig,
+      lora: crate::config::LoraConfig,
 }
 
 impl GspService {
-      pub fn new(pool: sqlx::SqlitePool, lora: crate::ingest::LoraConfig) -> Self {
+      pub fn new(pool: sqlx::SqlitePool, lora: crate::config::LoraConfig) -> Self {
       GspService { pool, lora }
   }
 }

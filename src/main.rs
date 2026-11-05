@@ -1,7 +1,10 @@
 mod bridge;
+mod config;
+mod display;
 mod forecast;
 mod ingest;
 mod gsp_service;
+mod protocol;
 mod store;
 
 use gsp_service::GspService;
@@ -13,7 +16,7 @@ define_load_config! {}
 define_load_asset! {}
 
 run_actor_system!(actor_system => {
-    let lora: ingest::LoraConfig = crate::load_config("lora.ron")?;
+    let lora: config::LoraConfig = crate::load_config("lora.ron")?;
     std::fs::create_dir_all("data")?;
     let pool = store::init_db("sqlite://data/gsp.db?mode=rwc").await?;
 

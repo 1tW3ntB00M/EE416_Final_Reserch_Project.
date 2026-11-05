@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine as _;
 use std::time::Duration;
-use crate::ingest::{IngestMsg, LoraConfig, LoraPacket};
+use crate::ingest::{IngestMsg, LoraPacket};
+use crate::config::LoraConfig;
 
 
 fn checksum(covered: &[u8]) -> u8 {
@@ -135,7 +136,7 @@ pub fn encode_downlink(dev_eui: &str, bytes: &[u8]) -> (String, String) {
 pub async fn run_mqtt(h_ingest: ActorHandle<IngestMsg>, lora: LoraConfig, rx_down: MpscReceiver<(String, Vec<u8>)>) {
   // 1. topics from lora.ron
   let (broker, uplink, downlink_template) = match &lora.bridge {
-    crate::ingest::BridgeConfig::Mqtt { broker, uplink_topic, downlink_topic } =>
+    crate::config::BridgeConfig::Mqtt { broker, uplink_topic, downlink_topic } =>
       (broker.clone(), uplink_topic.clone(), downlink_topic.clone()),
     _ => { println!("bridge: Serial not yet supported"); return; }
   };

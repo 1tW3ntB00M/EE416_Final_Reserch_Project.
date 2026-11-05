@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 use odin_actor::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::ingest::{IngestMsg, LoraConfig, SendCommand, SensorCommandKind};
+use crate::ingest::IngestMsg;
+use crate::config::LoraConfig;
+use crate::protocol::{SendCommand, SensorCommandKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastConfig {
